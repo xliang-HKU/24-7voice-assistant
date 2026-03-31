@@ -1,0 +1,192 @@
+"""
+core/stt.py
+实时语音识别线程（基于 sherpa-onnx）
+兼容新旧版本 API
+"""
+import queue
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import sounddevice as sd
+
+try:
+    import sherpa_onnx
+    SHERPA_AVAILABLE = True
+except ImportError:
+    SHERPA_AVAILABLE = False
+
+from PySide6.QtCore import QThread, Signal
+
+from config import (
+    MODEL_DIR,
+    STT_SAMPLE_RATE,
+    STT_BLOCK_SIZE,
+    STT_RULE1_MIN_TRAILING_SILENCE,
+    STT_RULE2_MIN_TRAILING_SILENCE,
+    STT_RULE3_MIN_UTTERANCE_LENGTH,
+)
+
+
+def _get_text(result) -> str:
+    """兼容不同版本：result 可能是 str 或带 .text 属性的对象"""
+    if isinstance(result, str):
+        return result.strip()
+    return result.text.strip()
+
+
+class STTThread(QThread):
+    text_partial = Signal(str)
+    text_final   = Signal(str)
+    error        = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.running      = False
+        self.recognizer   = None
+        self.device_index: Optional[int] = None
+        self._audio_q: queue.Queue = queue.Queue()
+        self._decode_fn   = None   # 兼容新旧 decode API
+
+    # ── 设备 ──────────────────────────────────
+
+    @staticmethod
+    def list_devices() -> list[tuple[int, str]]:
+        devices = []
+        try:
+            for i, d in enumerate(sd.query_devices()):
+                if d["max_input_channels"] > 0:
+                    devices.append((i, d["name"]))
+        except Exception:
+            pass
+        return devices
+
+    def set_device(self, device_index: int):
+        self.device_index = device_index
+
+    # ── 模型加载 ──────────────────────────────
+
+    def load_model(self) -> bool:
+        if not SHERPA_AVAILABLE:
+            self.error.emit("未找到 sherpa_onnx 模块\n请安装：pip install sherpa-onnx")
+            return False
+
+        if not MODEL_DIR.exists():
+            self.error.emit(
+                f"找不到模型目录：{MODEL_DIR.absolute()}\n\n"
+                "请下载模型并放入 model/ 目录，参见 README.md"
+            )
+            return False
+
+        encoder = self._find(MODEL_DIR, ["encoder-*.int8.onnx", "encoder-*.onnx", "encoder.int8.onnx", "encoder.onnx"])
+        decoder = self._find(MODEL_DIR, ["decoder-*.int8.onnx", "decoder-*.onnx", "decoder.int8.onnx", "decoder.onnx"])
+        joiner  = self._find(MODEL_DIR, ["joiner-*.int8.onnx",  "joiner-*.onnx",  "joiner.int8.onnx",  "joiner.onnx"])
+        tokens  = self._find(MODEL_DIR, ["tokens.txt"])
+
+        if encoder and decoder and joiner and tokens:
+            try:
+                self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                    encoder=str(encoder),
+                    decoder=str(decoder),
+                    joiner=str(joiner),
+                    tokens=str(tokens),
+                    num_threads=2,
+                    sample_rate=STT_SAMPLE_RATE,
+                    feature_dim=80,
+                    decoding_method="greedy_search",
+                    enable_endpoint_detection=True,
+                    rule1_min_trailing_silence=STT_RULE1_MIN_TRAILING_SILENCE,
+                    rule2_min_trailing_silence=STT_RULE2_MIN_TRAILING_SILENCE,
+                    rule3_min_utterance_length=STT_RULE3_MIN_UTTERANCE_LENGTH,
+                )
+                self._setup_decode_fn()
+                print(f"[STT] Transducer 模型加载成功: {encoder.name}")
+                return True
+            except Exception as e:
+                print(f"[STT] Transducer 加载失败: {e}")
+
+        self.error.emit(
+            "model/ 目录中未找到可用模型文件\n\n"
+            "需要：encoder*.onnx + decoder*.onnx + joiner*.onnx + tokens.txt"
+        )
+        return False
+
+    def _setup_decode_fn(self):
+        """检测并绑定正确的 decode 方法（新版叫 decode_stream，旧版叫 decode）"""
+        if hasattr(self.recognizer, 'decode_stream'):
+            self._decode_fn = self.recognizer.decode_stream
+        elif hasattr(self.recognizer, 'decode_streams'):
+            # 部分版本只有 decode_streams（复数，接受列表）
+            self._decode_fn = lambda s: self.recognizer.decode_streams([s])
+        elif hasattr(self.recognizer, 'decode'):
+            self._decode_fn = self.recognizer.decode
+        else:
+            # 找不到任何 decode 方法，列出所有方法供调试
+            methods = [m for m in dir(self.recognizer) if not m.startswith('_')]
+            raise AttributeError(f"找不到 decode 方法，可用方法：{methods}")
+
+    @staticmethod
+    def _find(directory: Path, patterns: list[str]) -> Optional[Path]:
+        for pattern in patterns:
+            matches = list(directory.glob(pattern))
+            if matches:
+                return matches[0]
+        return None
+
+    # ── 录音主循环 ────────────────────────────
+
+    def start_recording(self):
+        self.running = True
+        self.start()
+
+    def stop_recording(self):
+        self.running = False
+
+    def run(self):
+        if self.recognizer is None:
+            if not self.load_model():
+                return
+
+        stream    = self.recognizer.create_stream()
+        last_text = ""
+
+        def _audio_cb(indata, frames, time_info, status):
+            mono = indata[:, 0].astype(np.float32)
+            self._audio_q.put(mono)
+
+        try:
+            with sd.InputStream(
+                samplerate=STT_SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=STT_BLOCK_SIZE,
+                device=self.device_index,
+                callback=_audio_cb,
+            ):
+                while self.running:
+                    try:
+                        chunk = self._audio_q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+
+                    stream.accept_waveform(STT_SAMPLE_RATE, chunk)
+
+                    while self.recognizer.is_ready(stream):
+                        self._decode_fn(stream)
+
+                    result = self.recognizer.get_result(stream)
+                    text   = _get_text(result)
+
+                    if text and text != last_text:
+                        self.text_partial.emit(text)
+                        last_text = text
+
+                    if self.recognizer.is_endpoint(stream):
+                        if text:
+                            self.text_final.emit(text)
+                        self.recognizer.reset(stream)
+                        stream    = self.recognizer.create_stream()
+                        last_text = ""
+
+        except Exception as e:
+            self.error.emit(f"录音错误：{e}")
