@@ -3,4 +3,5 @@ model/
 __pycache__/
 *.pyc
 *.tar.bz2
+*.bz2
 sherpa-onnx-*/
