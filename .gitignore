@@ -1,5 +1,6 @@
 output/
 model/
+.venv/
 __pycache__/
 *.pyc
 *.tar.bz2

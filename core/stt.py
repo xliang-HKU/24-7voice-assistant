@@ -45,6 +45,7 @@ class STTThread(QThread):
         self.running      = False
         self.recognizer   = None
         self.device_index: Optional[int] = None
+        self._input_sample_rate = STT_SAMPLE_RATE
         self._audio_q: queue.Queue = queue.Queue()
         self._decode_fn   = None   # 兼容新旧 decode API
 
@@ -63,6 +64,76 @@ class STTThread(QThread):
 
     def set_device(self, device_index: int):
         self.device_index = device_index
+
+    def _query_input_device(self) -> tuple[Optional[int], dict]:
+        """
+        返回当前选中的输入设备配置；如果未选中则回退到系统默认输入设备。
+        """
+        try:
+            if self.device_index is not None:
+                info = sd.query_devices(self.device_index, "input")
+                return self.device_index, info
+
+            default_input = sd.default.device[0]
+            if default_input is not None and default_input != -1:
+                info = sd.query_devices(default_input, "input")
+                return int(default_input), info
+        except Exception:
+            pass
+
+        try:
+            info = sd.query_devices(kind="input")
+            return None, info
+        except Exception as e:
+            raise RuntimeError(f"无法读取麦克风信息：{e}") from e
+
+    @staticmethod
+    def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+        if src_rate == dst_rate or len(audio) == 0:
+            return audio.astype(np.float32, copy=False)
+
+        new_length = max(1, int(round(len(audio) * dst_rate / src_rate)))
+        old_points = np.linspace(0.0, 1.0, num=len(audio), endpoint=False)
+        new_points = np.linspace(0.0, 1.0, num=new_length, endpoint=False)
+        resampled = np.interp(new_points, old_points, audio)
+        return resampled.astype(np.float32, copy=False)
+
+    def _stream_candidates(self) -> list[dict]:
+        """
+        生成一组较稳妥的 InputStream 配置：
+        1. 当前设备默认采样率
+        2. 当前设备 48k
+        3. 当前设备 44.1k
+        """
+        device_index, info = self._query_input_device()
+        default_sr = int(round(info.get("default_samplerate") or STT_SAMPLE_RATE))
+        max_channels = max(1, int(info.get("max_input_channels") or 1))
+
+        candidates: list[dict] = []
+        for sample_rate in (default_sr, 48000, 44100):
+            blocksize = max(256, int(round(STT_BLOCK_SIZE * sample_rate / STT_SAMPLE_RATE)))
+            config = {
+                "device": device_index,
+                "samplerate": sample_rate,
+                "channels": min(1, max_channels),
+                "dtype": "float32",
+                "blocksize": blocksize,
+            }
+            if config not in candidates:
+                candidates.append(config)
+        return candidates
+
+    @staticmethod
+    def _format_stream_error(exc: Exception) -> str:
+        message = str(exc)
+        hints = [
+            "请确认 macOS 已允许此应用访问麦克风",
+            "请确认当前麦克风没有被其他程序独占",
+            "如果你外接了耳机/麦克风，重新选择一次输入设备后再试",
+        ]
+        if "PaErrorCode -9986" in message or "Internal PortAudio error" in message:
+            hints.insert(0, "当前麦克风可能不支持程序尝试的采样率，程序已尝试自动回退")
+        return "录音错误：{}\n\n{}".format(message, "\n".join(f"• {hint}" for hint in hints))
 
     # ── 模型加载 ──────────────────────────────
 
@@ -151,42 +222,52 @@ class STTThread(QThread):
         last_text = ""
 
         def _audio_cb(indata, frames, time_info, status):
-            mono = indata[:, 0].astype(np.float32)
+            mono = indata[:, 0].astype(np.float32, copy=False)
+            if self._input_sample_rate != STT_SAMPLE_RATE:
+                mono = self._resample_audio(mono, self._input_sample_rate, STT_SAMPLE_RATE)
             self._audio_q.put(mono)
 
-        try:
-            with sd.InputStream(
-                samplerate=STT_SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-                blocksize=STT_BLOCK_SIZE,
-                device=self.device_index,
-                callback=_audio_cb,
-            ):
-                while self.running:
-                    try:
-                        chunk = self._audio_q.get(timeout=0.1)
-                    except queue.Empty:
-                        continue
+        last_error: Exception | None = None
+        for cfg in self._stream_candidates():
+            try:
+                self._input_sample_rate = int(cfg["samplerate"])
+                print(f"[STT] 尝试打开麦克风: device={cfg['device']} samplerate={cfg['samplerate']}")
+                with sd.InputStream(
+                    samplerate=cfg["samplerate"],
+                    channels=cfg["channels"],
+                    dtype=cfg["dtype"],
+                    blocksize=cfg["blocksize"],
+                    device=cfg["device"],
+                    callback=_audio_cb,
+                ):
+                    while self.running:
+                        try:
+                            chunk = self._audio_q.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
 
-                    stream.accept_waveform(STT_SAMPLE_RATE, chunk)
+                        stream.accept_waveform(STT_SAMPLE_RATE, chunk)
 
-                    while self.recognizer.is_ready(stream):
-                        self._decode_fn(stream)
+                        while self.recognizer.is_ready(stream):
+                            self._decode_fn(stream)
 
-                    result = self.recognizer.get_result(stream)
-                    text   = _get_text(result)
+                        result = self.recognizer.get_result(stream)
+                        text   = _get_text(result)
 
-                    if text and text != last_text:
-                        self.text_partial.emit(text)
-                        last_text = text
+                        if text and text != last_text:
+                            self.text_partial.emit(text)
+                            last_text = text
 
-                    if self.recognizer.is_endpoint(stream):
-                        if text:
-                            self.text_final.emit(text)
-                        self.recognizer.reset(stream)
-                        stream    = self.recognizer.create_stream()
-                        last_text = ""
+                        if self.recognizer.is_endpoint(stream):
+                            if text:
+                                self.text_final.emit(text)
+                            self.recognizer.reset(stream)
+                            stream    = self.recognizer.create_stream()
+                            last_text = ""
+                return
+            except Exception as e:
+                last_error = e
+                print(f"[STT] 打开麦克风失败: {e}")
 
-        except Exception as e:
-            self.error.emit(f"录音错误：{e}")
+        if last_error is not None:
+            self.error.emit(self._format_stream_error(last_error))

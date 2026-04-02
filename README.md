@@ -1,131 +1,198 @@
-# 智能语音助手 🎙️
+# 老年人语音助手
 
-实时语音转文字 + DeepSeek AI 对话 + 记忆搜索
+一个面向 `macOS` 桌面的极简语音陪伴助手。
 
-## 项目结构
+当前版本的核心能力：
 
-```
-voice_assistant/
-├── main.py              ← 启动入口
-├── config.py            ← 所有配置项
-├── requirements.txt     ← Python 依赖
-├── core/
-│   ├── memory.py        ← 对话记忆 & 搜索
-│   ├── ai.py            ← DeepSeek AI 对话
-│   └── stt.py           ← 实时语音识别
-├── ui/
-│   ├── main_window.py   ← 主窗口
-│   └── widgets.py       ← 消息气泡等组件
-├── model/               ← 放语音模型（见下方）
-└── output/
-    └── memory.json      ← 自动生成，保存对话历史
-```
+- 情感陪伴：接入豆包端到端实时语音，对话自然、连续
+- 长期记忆：保存完整对话，并额外抽取人物事实记忆
+- 自动提醒：听到提醒类语句后直接记下，不再二次确认
+- 到点提醒：程序开着时，会由实时语音主动开口提醒
+- 极简界面：只有开始/结束对话按钮，以及左上角待提醒事项框
 
----
+## 当前流程
 
-## 安装步骤
+现在的提醒流程是：
 
-### 1. 安装 Python 依赖
+1. 用户说“明天下午三点记得吃药”
+2. 程序立即把提醒记到左上角列表
+3. 后台再用 LLM 把提醒文案润色得更自然
+4. 到点时由实时语音主动说出提醒
+
+注意：
+
+- 不再使用本地 TTS 做确认或到点播报
+- 不再要求用户说“可以”来确认提醒
+- 提醒只在程序保持开启时生效
+
+## 运行环境
+
+- `macOS`
+- `Python 3.10+`，推荐 `3.11`
+- 首次启动时需要给应用授予麦克风权限
+
+## 安装
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-### 2. 下载语音识别模型
+## 配置
 
-将模型文件放入项目根目录的 `model/` 文件夹（如果不存在请手动创建）。
+程序运行时读取 `output/settings.json`。
 
-**推荐模型（中英文双语，约 200MB）：**
+建议不要直接编辑仓库里现成的 `output/settings.json` 去分发，而是按下面的方式生成自己的本地配置：
 
-```
-https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2
-```
-
-下载解压后，把里面的文件全部复制到 `model/` 目录：
-
-```
-model/
-├── encoder-epoch-99-avg-1.int8.onnx   ← encoder
-├── decoder-epoch-99-avg-1.onnx        ← decoder
-├── joiner-epoch-99-avg-1.int8.onnx    ← joiner
-└── tokens.txt
-```
-
-> 程序会自动识别 Transducer 或 CTC 两种格式，文件名不必完全一致。
-> 只要目录下有 `encoder*.onnx`、`decoder*.onnx`、`joiner*.onnx`、`tokens.txt` 即可。
-
-**其他可用模型：**
-
-| 模型名 | 大小 | 特点 |
-|--------|------|------|
-| sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20 | ~200MB | 中英双语，推荐 |
-| sherpa-onnx-streaming-zipformer-small-ctc-zh-2025-04-01 | ~87MB | 纯中文，较小 |
-| sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30 | ~60MB | 纯中文，量化版 |
-
-所有模型下载地址：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
-
-### 3. 配置 DeepSeek API Key
-
-**方式一：环境变量（推荐）**
 ```bash
-# macOS / Linux
-export DEEPSEEK_API_KEY=sk-xxxxxxxx
-
-# Windows (CMD)
-set DEEPSEEK_API_KEY=sk-xxxxxxxx
-
-# Windows (PowerShell)
-$env:DEEPSEEK_API_KEY="sk-xxxxxxxx"
+mkdir -p output
+cp settings.example.json output/settings.json
 ```
 
-**方式二：启动后在界面左侧填写**
+然后填写你自己的密钥。
 
-DeepSeek API Key 申请地址：https://platform.deepseek.com
+### 最小可用配置
 
----
+默认主流程只依赖两部分：
 
-## 启动程序
+- `realtime`：豆包 Dialog 实时语音
+- `llm`：用于提醒文案润色，非必需，但强烈建议配置
+
+`tts` 现在默认关闭，仅作为保留配置，不参与当前主流程。
+
+### `realtime` 配置说明
+
+```json
+{
+  "realtime": {
+    "provider": "doubao_dialog",
+    "enabled": true,
+    "ws_url": "wss://openspeech.bytedance.com/api/v3/realtime/dialogue",
+    "model": "AG-voice-chat-agent",
+    "voice": "zh_female_vv_jupiter_bigtts",
+    "app_id": "你的 APP ID",
+    "app_key": "PlgvMymc7f3tQnJ6",
+    "access_key": "你的 Access Token",
+    "resource_id": "volc.speech.dialog",
+    "bot_name": "豆包"
+  }
+}
+```
+
+说明：
+
+- `ws_url` 固定为 `wss://openspeech.bytedance.com/api/v3/realtime/dialogue`
+- `resource_id` 固定为 `volc.speech.dialog`
+- `app_key` 目前填官方文档里的固定值 `PlgvMymc7f3tQnJ6`
+- 控制台里的 `APP ID` 和 `Access Token` 要分别填到 `app_id`、`access_key`
+- 当前默认请求 `pcm_s16le / 24000Hz` 输出音频
+
+### `llm` 配置说明
+
+`llm` 用来做提醒内容润色，例如把“15点吃药”整理成更自然的：
+
+- 列表内容：`吃药`
+- 播报内容：`提醒你，该吃药了。`
+
+如果不配置 `llm`，程序仍可运行，只是提醒文案会更朴素。
+
+## 启动
 
 ```bash
 python main.py
 ```
 
----
+## 使用方式
 
-## 使用说明
+1. 点击 `开始对话`
+2. 直接说话
+3. 说完停顿一下，助手会自动继续接话
+4. 如果说出类似“明天下午三点记得吃药”，提醒会自动进入左上角列表
+5. 程序开着时，到点会由实时语音主动提醒
 
-### 语音输入
-1. 在左侧选择正确的麦克风
-2. 点击「开始录音」
-3. 说话，停顿约 1-2 秒后自动识别并发送给 AI
+## 长期记忆
 
-### 文字输入
-在底部输入框直接输入，按 Enter 或点击「发送」
+程序会保存两类记忆：
 
-### 记忆搜索
-程序会自动检测以下查询意图，并从历史记录中搜索相关内容：
+- 原始对话历史：`output/memory.json`
+- 结构化人物事实：`output/profile_memory.json`
 
-| 示例输入 | 行为 |
-|----------|------|
-| 帮我查一下明天的行程 | 搜索明天日期相关记录 |
-| 今天有什么安排？ | 搜索今天相关记录 |
-| 我之前说过什么会议？ | 关键词"会议"全局搜索 |
-| 查找一下我的待办事项 | 关键词"待办"全局搜索 |
+目前会优先抽取：
 
----
+- 家庭关系
+- 健康信息
+- 近期安排
+- 背景信息
+- 居住信息
 
-## 配置修改
+这些信息会在后续会话中重新注入，让助手更像“真的记得你”。
 
-编辑 `config.py` 可以调整所有参数：
+## 目录结构
 
-```python
-# 切换 AI 模型
-DEEPSEEK_MODEL = "deepseek-chat"       # 普通版
-DEEPSEEK_MODEL = "deepseek-reasoner"   # 推理版（R1）
-
-# 调整断句灵敏度（越小越容易断句）
-STT_RULE1_MIN_TRAILING_SILENCE = 2.4
-
-# 对话上下文轮数
-MEMORY_CONTEXT_TURNS = 10
+```text
+24-7voice-assistant/
+├── main.py
+├── config.py
+├── requirements.txt
+├── settings.example.json
+├── core/
+│   ├── ai.py
+│   ├── memory.py
+│   ├── realtime_voice.py
+│   ├── reminders.py
+│   ├── settings.py
+│   ├── stt.py
+│   └── tts.py
+├── ui/
+│   └── main_window.py
+└── output/
+    ├── settings.json
+    ├── memory.json
+    ├── profile_memory.json
+    ├── reminders.json
+    └── tts_cache/
 ```
+
+其中：
+
+- `settings.example.json` 是分发用模板
+- `output/` 是运行期目录，会保存你的本地配置和数据
+- `core/stt.py` 是旧版本地识别代码，当前默认流程不使用
+
+## 依赖说明
+
+当前默认流程实际需要的 Python 依赖只有：
+
+- `PySide6`
+- `sounddevice`
+- `numpy`
+- `openai`
+- `websockets`
+
+`sherpa-onnx` 已不再是当前默认流程的安装前置条件。
+
+## 分发建议
+
+如果你准备把项目发给别人看，建议这样处理：
+
+1. 提交代码时不要带上你自己的 `output/settings.json`
+2. 不要带上 `output/memory.json`、`output/profile_memory.json`、`output/reminders.json`
+3. 让对方从 `settings.example.json` 复制出自己的 `output/settings.json`
+
+我这次没有替你清空当前本地 `output/settings.json`，是为了避免把你现在能正常使用的配置破坏掉。
+
+## 已知说明
+
+- 当前项目面向 `macOS`
+- 提醒只在程序保持开启时生效
+- 到点提醒现在走实时语音，不走本地 TTS
+- 如果实时会话当时没开，到点提醒会先自动拉起实时会话，再播报
+- 首次创建提醒时会先秒记下，再后台润色，所以提醒文案可能会轻微更新一次
+
+## 参考文档
+
+- 豆包实时语音 Dialog API：https://www.volcengine.com/docs/6561/1594356?lang=zh
+- 豆包实时语音 iOS SDK 文档：https://www.volcengine.com/docs/6561/1597646
+- 火山语音相关 WebSocket 文档：https://www.volcengine.com/docs/6561/1756902
