@@ -12,6 +12,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -29,6 +30,10 @@ from core.realtime_voice import RealtimeVoiceThread
 from core.reminders import ReminderDraft, ReminderManager, ReminderParser, ReminderScheduler
 from core.settings import SettingsManager
 from core.tts import SpeechManager
+from ui.effects import NeonGlow
+from ui.icons import icon_size_for_button, mic_icon, stop_icon
+from ui.responsive import compute_breakpoint
+from ui.theme import TOKENS, app_stylesheet, qcolor, repolish
 
 
 class ReminderPolishWorker(QThread):
@@ -69,6 +74,7 @@ class MainWindow(QMainWindow):
         self.reminder_polish_workers: list[ReminderPolishWorker] = []
         self.last_user_text = ""
         self.last_assistant_text = ""
+        self._bp = "lg"
 
         self._setup_ui()
         self._connect_signals()
@@ -85,119 +91,189 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(WINDOW_MIN_W, WINDOW_MIN_H)
         self.resize(1080, 760)
-        self.setStyleSheet(self._app_style())
+        self.setStyleSheet(app_stylesheet())
 
         central = QWidget()
+        central.setObjectName("root")
         self.setCentralWidget(central)
 
-        root = QVBoxLayout(central)
-        root.setContentsMargins(28, 24, 28, 28)
-        root.setSpacing(18)
+        self.root_layout = QVBoxLayout(central)
+        self.root_layout.setContentsMargins(28, 24, 28, 28)
+        self.root_layout.setSpacing(18)
 
-        top = QHBoxLayout()
-        top.setSpacing(18)
-        top.addWidget(self._build_reminder_card(), 0)
-        top.addWidget(self._build_intro_card(), 1)
-        root.addLayout(top)
+        self.top_layout = QHBoxLayout()
+        self.top_layout.setSpacing(18)
+        self.top_layout.addWidget(self._build_reminder_card(), 0)
+        self.top_layout.addWidget(self._build_intro_card(), 1)
+        self.root_layout.addLayout(self.top_layout)
 
-        root.addWidget(self._build_live_card(), 1)
+        self.root_layout.addWidget(self._build_live_card(), 1)
 
         self.talk_btn = QPushButton("开始对话")
         self.talk_btn.setFixedHeight(78)
         self.talk_btn.setCursor(Qt.PointingHandCursor)
-        self.talk_btn.setStyleSheet(self._talk_btn_style(active=False))
-        root.addWidget(self.talk_btn)
+        self.talk_btn.setProperty("variant", "primary")
+        self.talk_btn.setProperty("state", "idle")
+        self.talk_btn.setIcon(mic_icon(color=TOKENS.bg_0))
+        self.root_layout.addWidget(self.talk_btn)
 
         self.footer_label = QLabel()
         self.footer_label.setAlignment(Qt.AlignCenter)
-        self.footer_label.setStyleSheet("color:#6a6f63; font-size:13px;")
-        root.addWidget(self.footer_label)
+        self.footer_label.setProperty("role", "footer")
+        self.root_layout.addWidget(self.footer_label)
+
+        self._talk_btn_glow = NeonGlow(
+            self.talk_btn,
+            base_color=qcolor(TOKENS.neon_cyan, 0),
+            hover_color=qcolor(TOKENS.neon_cyan, 255),
+            active_color=qcolor(TOKENS.neon_orange, 255),
+        )
+
+        self._card_glows = [
+            NeonGlow(
+                self.reminder_card,
+                base_color=qcolor(TOKENS.neon_cyan, 0),
+                hover_color=qcolor(TOKENS.neon_cyan, 255),
+                active_color=qcolor(TOKENS.neon_cyan, 255),
+            ),
+            NeonGlow(
+                self.intro_card,
+                base_color=qcolor(TOKENS.neon_purple, 0),
+                hover_color=qcolor(TOKENS.neon_purple, 255),
+                active_color=qcolor(TOKENS.neon_purple, 255),
+            ),
+            NeonGlow(
+                self.live_card,
+                base_color=qcolor(TOKENS.neon_green, 0),
+                hover_color=qcolor(TOKENS.neon_green, 255),
+                active_color=qcolor(TOKENS.neon_green, 255),
+            ),
+        ]
+
+        self._apply_responsive()
+
+    def _apply_responsive(self):
+        root = self.centralWidget()
+        if not root:
+            return
+
+        bp = compute_breakpoint(self.width())
+        root.setProperty("bp", bp)
+        if bp != self._bp:
+            self._bp = bp
+            repolish(root)
+
+        if bp == "sm":
+            self.root_layout.setContentsMargins(16, 14, 16, 16)
+            self.root_layout.setSpacing(14)
+            self.top_layout.setDirection(QBoxLayout.TopToBottom)
+            self.top_layout.setSpacing(14)
+            self.talk_btn.setFixedHeight(64)
+            self.reminder_card.setMaximumWidth(16777215)
+        elif bp == "md":
+            self.root_layout.setContentsMargins(22, 18, 22, 22)
+            self.root_layout.setSpacing(16)
+            self.top_layout.setDirection(QBoxLayout.LeftToRight)
+            self.top_layout.setSpacing(16)
+            self.talk_btn.setFixedHeight(72)
+            self.reminder_card.setMaximumWidth(400)
+        else:
+            self.root_layout.setContentsMargins(28, 24, 28, 28)
+            self.root_layout.setSpacing(18)
+            self.top_layout.setDirection(QBoxLayout.LeftToRight)
+            self.top_layout.setSpacing(18)
+            self.talk_btn.setFixedHeight(78)
+            self.reminder_card.setMaximumWidth(420)
+
+        self.talk_btn.setIconSize(icon_size_for_button(bp))
+
+    def resizeEvent(self, event):
+        self._apply_responsive()
+        super().resizeEvent(event)
 
     def _build_reminder_card(self) -> QWidget:
         card = self._card()
-        card.setFixedWidth(320)
+        card.setObjectName("cardReminder")
+        card.setProperty("card", True)
+        card.setMinimumWidth(300)
+        card.setMaximumWidth(420)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
         title = QLabel("待提醒事项")
-        title.setStyleSheet("font-size:20px; font-weight:700; color:#2f4f3e;")
+        title.setProperty("role", "cardTitle")
         layout.addWidget(title)
 
         self.reminder_box = QPlainTextEdit()
         self.reminder_box.setReadOnly(True)
         self.reminder_box.setMinimumHeight(230)
-        self.reminder_box.setStyleSheet("""
-            QPlainTextEdit {
-                background:#fffdf8;
-                color:#3f4438;
-                border:1px solid #d9d1bf;
-                border-radius:18px;
-                padding:12px;
-                font-size:17px;
-                line-height:1.7;
-            }
-        """)
+        self.reminder_box.setProperty("role", "reminderBox")
         layout.addWidget(self.reminder_box, 1)
 
         self.memory_summary_label = QLabel()
         self.memory_summary_label.setWordWrap(True)
-        self.memory_summary_label.setStyleSheet("font-size:14px; color:#6a6f63; line-height:1.6;")
+        self.memory_summary_label.setProperty("role", "meta")
         layout.addWidget(self.memory_summary_label)
+        self.reminder_card = card
         return card
 
     def _build_intro_card(self) -> QWidget:
         card = self._card()
+        card.setObjectName("cardIntro")
+        card.setProperty("card", True)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(10)
 
         title = QLabel(APP_NAME)
-        title.setStyleSheet("font-size:34px; font-weight:800; color:#2f4f3e;")
+        title.setProperty("role", "appTitle")
         layout.addWidget(title)
 
         subtitle = QLabel("陪老人聊天，记住重要的人和事，也把需要提醒的事情记下来。")
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("font-size:18px; color:#575d50; line-height:1.6;")
+        subtitle.setProperty("role", "subtitle")
         layout.addWidget(subtitle)
 
         self.state_label = QLabel()
         self.state_label.setWordWrap(True)
-        self.state_label.setStyleSheet(
-            "font-size:22px; font-weight:700; color:#c46c2c; padding-top:8px; line-height:1.5;"
-        )
+        self.state_label.setProperty("role", "state")
         layout.addWidget(self.state_label)
 
         layout.addStretch()
 
         self.backend_label = QLabel()
         self.backend_label.setWordWrap(True)
-        self.backend_label.setStyleSheet("font-size:14px; color:#6a6f63; line-height:1.7;")
+        self.backend_label.setProperty("role", "meta")
         layout.addWidget(self.backend_label)
+        self.intro_card = card
         return card
 
     def _build_live_card(self) -> QWidget:
         card = self._card()
+        card.setObjectName("cardLive")
+        card.setProperty("card", True)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(26, 24, 26, 24)
         layout.setSpacing(18)
 
         header = QLabel("最近对话")
-        header.setStyleSheet("font-size:20px; font-weight:700; color:#2f4f3e;")
+        header.setProperty("role", "cardTitle")
         layout.addWidget(header)
 
         self.user_live_label = QLabel()
         self.user_live_label.setWordWrap(True)
         self.user_live_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.user_live_label.setStyleSheet(self._live_block_style("#f0efe6", "#495142"))
+        self.user_live_label.setProperty("role", "liveUser")
         layout.addWidget(self.user_live_label)
 
         self.assistant_live_label = QLabel()
         self.assistant_live_label.setWordWrap(True)
         self.assistant_live_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.assistant_live_label.setStyleSheet(self._live_block_style("#eef6ef", "#355946"))
+        self.assistant_live_label.setProperty("role", "liveAssistant")
         layout.addWidget(self.assistant_live_label)
 
+        self.live_card = card
         return card
 
     # ── 连接 ──────────────────────────────────
@@ -243,20 +319,29 @@ class MainWindow(QMainWindow):
         self.realtime_thread.wait(2500)
         self.realtime_thread = None
         self.talk_btn.setText("开始对话")
-        self.talk_btn.setStyleSheet(self._talk_btn_style(active=False))
+        self.talk_btn.setProperty("state", "idle")
+        self.talk_btn.setIcon(mic_icon(color=TOKENS.bg_0))
+        repolish(self.talk_btn)
+        self._talk_btn_glow.set_active(False)
         self.talk_btn.setEnabled(True)
         self._set_state("对话已结束。需要时再点一次开始对话。")
 
     def _on_realtime_ready(self):
         self.talk_btn.setText("结束对话")
-        self.talk_btn.setStyleSheet(self._talk_btn_style(active=True))
+        self.talk_btn.setProperty("state", "active")
+        self.talk_btn.setIcon(stop_icon(color=TOKENS.text_0))
+        repolish(self.talk_btn)
+        self._talk_btn_glow.set_active(True)
         self.talk_btn.setEnabled(True)
         self._set_state("我在听，你可以直接说话。")
         self._flush_pending_realtime_queries()
 
     def _on_realtime_finished(self):
         self.talk_btn.setText("开始对话")
-        self.talk_btn.setStyleSheet(self._talk_btn_style(active=False))
+        self.talk_btn.setProperty("state", "idle")
+        self.talk_btn.setIcon(mic_icon(color=TOKENS.bg_0))
+        repolish(self.talk_btn)
+        self._talk_btn_glow.set_active(False)
         self.talk_btn.setEnabled(True)
         self.realtime_thread = None
 
@@ -533,13 +618,6 @@ class MainWindow(QMainWindow):
     def _card() -> QFrame:
         frame = QFrame()
         frame.setFrameShape(QFrame.StyledPanel)
-        frame.setStyleSheet("""
-            QFrame {
-                background:#fff7eb;
-                border:1px solid #dccfb8;
-                border-radius:26px;
-            }
-        """)
         return frame
 
     @staticmethod

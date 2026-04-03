@@ -5,18 +5,20 @@ ui/widgets.py
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt
 
+from ui.theme import TOKENS
+
 
 # ── 颜色主题 ──────────────────────────────────
 COLORS = {
-    "user_bg":      "#1c3a5e",
-    "user_border":  "#2a5490",
-    "ai_bg":        "#1a2a1a",
-    "ai_border":    "#2d5a2d",
-    "system_bg":    "#2a2010",
-    "system_border":"#5a4020",
-    "text":         "#e2e8f0",
-    "muted":        "#718096",
-    "timestamp":    "#4a5568",
+    "user_bg": "#0B1E3A",
+    "user_border": TOKENS.neon_cyan,
+    "ai_bg": "#180C2F",
+    "ai_border": TOKENS.neon_purple,
+    "system_bg": "#1D120A",
+    "system_border": TOKENS.neon_orange,
+    "text": TOKENS.text_0,
+    "muted": TOKENS.text_2,
+    "timestamp": TOKENS.text_2,
 }
 
 
@@ -40,8 +42,7 @@ class MessageWidget(QFrame):
 
         # ── 样式 & 边距
         if role == "user":
-            icon  = "🎙️" if source == "voice" else "💬"
-            label = f"{icon} 你"
+            label = "你"
             self.setStyleSheet(f"""
                 QFrame {{
                     background: {COLORS['user_bg']};
@@ -51,8 +52,7 @@ class MessageWidget(QFrame):
                 }}
             """)
         elif role == "assistant":
-            icon  = "🤖"
-            label = f"{icon} 助手"
+            label = "助手"
             self.setStyleSheet(f"""
                 QFrame {{
                     background: {COLORS['ai_bg']};
@@ -62,8 +62,7 @@ class MessageWidget(QFrame):
                 }}
             """)
         else:
-            icon  = "📋"
-            label = f"{icon} 系统"
+            label = "系统"
             self.setStyleSheet(f"""
                 QFrame {{
                     background: {COLORS['system_bg']};

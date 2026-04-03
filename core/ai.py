@@ -208,7 +208,7 @@ class AIProcessor:
         return message or ""
 
     @staticmethod
-    def _extract_json(text: str) -> dict | None:
+    def _extract_json(text: str):
         if not text:
             return None
         text = text.strip()
